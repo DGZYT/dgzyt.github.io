@@ -1,0 +1,71 @@
+name: Build and deploy Helldivers map
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "relay/**"
+      - "assets/**"
+      - "data/**"
+      - ".github/workflows/deploy-pages.yml"
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r relay/requirements.txt
+
+      - name: Build static site
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PAGES_BASE_URL: ${{ vars.PAGES_BASE_URL }}
+          HD2_SUPER_CLIENT: ${{ vars.HD2_SUPER_CLIENT }}
+          HD2_SUPER_CONTACT: ${{ vars.HD2_SUPER_CONTACT }}
+        run: python relay/build.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    permissions:
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
