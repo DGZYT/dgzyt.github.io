@@ -232,9 +232,10 @@ def get_projected_coords(
     if raw_x is None or raw_y is None:
         return 0.5, 0.5, "fallback"
 
-    min_x, max_x, min_y, max_y = bounds
-    norm_x = (raw_x - min_x) / (max_x - min_x)
-    norm_y = 1.0 - ((raw_y - min_y) / (max_y - min_y))
+    # HD2 coordinates are centered around Super Earth at (0, 0),
+    # so project directly into the circular board.
+    norm_x = 0.5 + (raw_x * 0.5)
+    norm_y = 0.5 - (raw_y * 0.5)
 
     return clamp(norm_x, 0.0, 1.0), clamp(norm_y, 0.0, 1.0), "auto"
 
