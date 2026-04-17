@@ -482,8 +482,7 @@ def draw_ring(draw: ImageDraw.ImageDraw, x: int, y: int, r: int, color: tuple[in
 def render_sector_overlay(planets: list[dict[str, Any]], size: tuple[int, int]) -> Image.Image:
     width, height = size
 
-    # Work at a smaller resolution for performance, then scale up and blur.
-    downsample = 4
+    downsample = 3
     small_w = max(1, width // downsample)
     small_h = max(1, height // downsample)
 
@@ -512,17 +511,18 @@ def render_sector_overlay(planets: list[dict[str, Any]], size: tuple[int, int]) 
     for py in range(small_h):
         y = py / max(1, small_h - 1)
         ny = (y - center_y) / radius_y
+
         for px in range(small_w):
             x = px / max(1, small_w - 1)
             nx = (x - center_x) / radius_x
 
-            # Elliptical galaxy mask.
             radial = nx * nx + ny * ny
             if radial > 1.0:
                 continue
 
             nearest_sector = None
             best_dist = float("inf")
+
             for sector_key, (cx, cy) in sector_centroids.items():
                 dx = x - cx
                 dy = y - cy
@@ -536,25 +536,30 @@ def render_sector_overlay(planets: list[dict[str, Any]], size: tuple[int, int]) 
 
             color = get_sector_color(nearest_sector)
 
-            # Fade slightly toward the edge of the galaxy to keep the base art visible.
-            edge_fade = clamp(1.0 - (radial ** 1.2), 0.0, 1.0)
-            alpha = int(color[3] * (0.35 + 0.65 * edge_fade))
+            edge_fade = clamp(1.0 - (radial ** 1.1), 0.0, 1.0)
+            alpha = int(130 * (0.45 + 0.55 * edge_fade))
+
             pixels[px, py] = (color[0], color[1], color[2], alpha)
 
     overlay = overlay.resize(size, resample=Image.Resampling.BILINEAR)
-    overlay = overlay.filter(ImageFilter.GaussianBlur(radius=10))
+    overlay = overlay.filter(ImageFilter.GaussianBlur(radius=6))
 
-    # Add thin boundary lines by detecting color changes in the overlay.
     boundary = Image.new("RGBA", size, (0, 0, 0, 0))
     src = overlay.load()
     dst = boundary.load()
+
     for y in range(1, height - 1):
         for x in range(1, width - 1):
             a = src[x, y][3]
             if a == 0:
                 continue
-            if src[x + 1, y][:3] != src[x - 1, y][:3] or src[x, y + 1][:3] != src[x, y - 1][:3]:
-                dst[x, y] = (255, 255, 255, 34)
+
+            if (
+                src[x + 1, y][:3] != src[x - 1, y][:3]
+                or src[x, y + 1][:3] != src[x, y - 1][:3]
+            ):
+                dst[x, y] = (255, 255, 255, 95)
+
     boundary = boundary.filter(ImageFilter.GaussianBlur(radius=1))
 
     final_overlay = Image.alpha_composite(overlay, boundary)
@@ -714,6 +719,8 @@ def main() -> None:
 
     save_json_file(SITE_DIR / "state.json", state)
     render_map(planets, SITE_DIR / "map.png")
+    sector_debug = render_sector_overlay(planets, ensure_base_map().size)
+    sector_debug.save(SITE_DIR / "sector_overlay_debug.png", format="PNG")
 
     with (SITE_DIR / "index.html").open("w", encoding="utf-8") as f:
         f.write(build_index_html(updated_at, base_url))
