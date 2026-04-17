@@ -19,10 +19,12 @@ BASE_MAP_PATH = ASSETS_DIR / "base_map.png"
 COORDS_PATH = DATA_DIR / "planet_coords.json"
 
 COMMUNITY_WAR_STATUS = "https://api.helldivers2.dev/raw/api/v1/war/status"
-COMMUNITY_PLANETS = "https://api.helldivers2.dev/raw/api/v1/planets"
+COMMUNITY_WAR_INFO   = "https://api.helldivers2.dev/raw/api/v1/war/info"
+COMMUNITY_PLANETS    = "https://api.helldivers2.dev/raw/api/v1/planets"
 
 FALLBACK_WAR_STATUS = "https://helldiverstrainingmanual.com/api/v1/war/status"
-FALLBACK_PLANETS = "https://helldiverstrainingmanual.com/api/v1/planets"
+FALLBACK_WAR_INFO   = "https://helldiverstrainingmanual.com/api/v1/war/info"
+FALLBACK_PLANETS    = "https://helldiverstrainingmanual.com/api/v1/planets"
 
 TIMEOUT = 20
 
@@ -300,10 +302,11 @@ def get_event_type(status_entry: dict[str, Any], attacking: list[int], players: 
 
 def build_planet_records(
     status_list: list[dict[str, Any]],
-    planet_lookup: dict[int, dict[str, Any]],
+    war_info_lookup: dict[int, dict[str, Any]],
+    biome_lookup: dict[int, dict[str, Any]],
     manual_coords: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    bounds = compute_position_bounds(planet_lookup)
+    bounds = compute_position_bounds(war_info_lookup)
     records: list[dict[str, Any]] = []
 
     for status in status_list:
@@ -311,17 +314,20 @@ def build_planet_records(
         if index < 0:
             continue
 
-        meta = planet_lookup.get(index, {})
-        x, y, coord_source = get_projected_coords(index, meta, manual_coords, bounds)
+        info = war_info_lookup.get(index, {})
+        biome_meta = biome_lookup.get(index, {})
 
-        name = str(first_non_null(meta.get("name"), status.get("name"), f"Planet {index}"))
-        sector = str(first_non_null(meta.get("sector"), status.get("sector"), ""))
+        x, y, coord_source = get_projected_coords(index, info, manual_coords, bounds)
+
+        name = str(first_non_null(info.get("name"), status.get("name"), f"Planet {index}"))
+        sector = str(first_non_null(info.get("sector"), status.get("sector"), ""))
+
         owner = normalize_owner(
             first_non_null(
                 status.get("owner"),
                 status.get("currentOwner"),
-                meta.get("currentOwner"),
-                meta.get("owner"),
+                info.get("currentOwner"),
+                info.get("owner"),
             )
         )
 
@@ -330,11 +336,11 @@ def build_planet_records(
         liberation = round(get_liberation(status), 2)
         event_type = get_event_type(status, attacking, players)
 
-        biome = first_non_null(meta.get("biome"), meta.get("environment"), "")
+        biome = first_non_null(biome_meta.get("biome"), biome_meta.get("environment"), "")
         if isinstance(biome, dict):
             biome = biome.get("name", "")
 
-        hazards = meta.get("environmentals", [])
+        hazards = biome_meta.get("environmentals", [])
         if not isinstance(hazards, list):
             hazards = []
 
@@ -508,13 +514,16 @@ def main() -> None:
         headers["X-Super-Contact"] = contact
 
     war_status_payload = fetch_json(COMMUNITY_WAR_STATUS, FALLBACK_WAR_STATUS, headers=headers)
-    planets_payload = fetch_json(COMMUNITY_PLANETS, FALLBACK_PLANETS, headers=headers)
+    war_info_payload   = fetch_json(COMMUNITY_WAR_INFO,   FALLBACK_WAR_INFO,   headers=headers)
+    planets_payload    = fetch_json(COMMUNITY_PLANETS,    FALLBACK_PLANETS,    headers=headers)
 
-    planet_lookup = coerce_planet_lookup(planets_payload)
+    war_info_lookup = coerce_planet_lookup(war_info_payload)
+    biome_lookup    = coerce_planet_lookup(planets_payload)
+
     status_list = coerce_status_list(war_status_payload)
     manual_coords = load_json_file(COORDS_PATH, default={})
 
-    planets = build_planet_records(status_list, planet_lookup, manual_coords)
+    planets = build_planet_records(status_list, war_info_lookup, biome_lookup, manual_coords)
 
     base_url = derive_pages_base_url()
     updated_at = datetime.now(timezone.utc).isoformat()
