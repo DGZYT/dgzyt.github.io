@@ -556,14 +556,20 @@ def main() -> None:
         headers["X-Super-Contact"] = contact
 
     war_status_payload = fetch_json(COMMUNITY_WAR_STATUS, FALLBACK_WAR_STATUS, headers=headers)
-    war_info_payload   = fetch_json(COMMUNITY_WAR_INFO,   FALLBACK_WAR_INFO,   headers=headers)
-    planets_payload    = fetch_json(COMMUNITY_PLANETS,    FALLBACK_PLANETS,    headers=headers)
+    war_info_payload = fetch_json(COMMUNITY_WAR_INFO, FALLBACK_WAR_INFO, headers=headers)
+    planets_payload = fetch_json(COMMUNITY_PLANETS, FALLBACK_PLANETS, headers=headers)
 
-    war_info_lookup = coerce_planet_lookup(war_info_payload)
-    biome_lookup    = coerce_planet_lookup(planets_payload)
+    war_info_lookup = collect_planet_info_records(war_info_payload)
+    biome_lookup = collect_planet_info_records(planets_payload)
 
-    status_list = coerce_status_list(war_status_payload)
+    status_candidates = collect_status_records(war_status_payload)
+    status_list = dedupe_status_records(status_candidates)
+
     manual_coords = load_json_file(COORDS_PATH, default={})
+
+    print(f"war_info planets found: {len(war_info_lookup)}")
+    print(f"biome planets found: {len(biome_lookup)}")
+    print(f"status records found: {len(status_list)}")
 
     planets = build_planet_records(status_list, war_info_lookup, biome_lookup, manual_coords)
 
