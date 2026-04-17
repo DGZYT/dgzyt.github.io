@@ -19,12 +19,12 @@ BASE_MAP_PATH = ASSETS_DIR / "base_map.png"
 COORDS_PATH = DATA_DIR / "planet_coords.json"
 
 COMMUNITY_WAR_STATUS = "https://api.helldivers2.dev/raw/api/v1/war/status"
-COMMUNITY_WAR_INFO   = "https://api.helldivers2.dev/raw/api/v1/war/info"
-COMMUNITY_PLANETS    = "https://api.helldivers2.dev/raw/api/v1/planets"
+COMMUNITY_WAR_INFO = "https://api.helldivers2.dev/raw/api/v1/war/info"
+COMMUNITY_PLANETS = "https://api.helldivers2.dev/raw/api/v1/planets"
 
 FALLBACK_WAR_STATUS = "https://helldiverstrainingmanual.com/api/v1/war/status"
-FALLBACK_WAR_INFO   = "https://helldiverstrainingmanual.com/api/v1/war/info"
-FALLBACK_PLANETS    = "https://helldiverstrainingmanual.com/api/v1/planets"
+FALLBACK_WAR_INFO = "https://helldiverstrainingmanual.com/api/v1/war/info"
+FALLBACK_PLANETS = "https://helldiverstrainingmanual.com/api/v1/planets"
 
 TIMEOUT = 20
 
@@ -136,61 +136,103 @@ def normalize_owner(owner_value: Any) -> str:
     return faction_map.get(owner_value, "Unknown")
 
 
-def coerce_planet_lookup(payload: Any) -> dict[int, dict[str, Any]]:
-    lookup: dict[int, dict[str, Any]] = {}
+def looks_like_planet_info_record(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
 
-    if isinstance(payload, list):
+    has_index = "index" in item
+    has_position = isinstance(item.get("position"), dict) and (
+        "x" in item["position"] and "y" in item["position"]
+    )
+    has_name = "name" in item
+    has_sector = "sector" in item
+
+    return has_index and (has_position or has_name or has_sector)
+
+
+def collect_planet_info_records(payload: Any, found: dict[int, dict[str, Any]] | None = None) -> dict[int, dict[str, Any]]:
+    if found is None:
+        found = {}
+
+    if isinstance(payload, dict):
+        if looks_like_planet_info_record(payload):
+            idx = as_int(payload.get("index"), -1)
+            if idx >= 0:
+                found[idx] = payload
+
+        for value in payload.values():
+            collect_planet_info_records(value, found)
+
+    elif isinstance(payload, list):
         for item in payload:
-            if not isinstance(item, dict):
-                continue
-            idx = as_int(item.get("index"), -1)
-            if idx >= 0:
-                lookup[idx] = item
-        return lookup
+            collect_planet_info_records(item, found)
+
+    return found
+
+
+def looks_like_status_record(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+
+    has_index = "index" in item or "planetIndex" in item
+    has_live_fields = any(
+        key in item
+        for key in (
+            "health",
+            "maxHealth",
+            "owner",
+            "currentOwner",
+            "statistics",
+            "players",
+            "playerCount",
+            "regenPerSecond",
+            "attacking",
+            "event",
+            "liberation",
+        )
+    )
+    return has_index and has_live_fields
+
+
+def collect_status_records(payload: Any, found: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    if found is None:
+        found = []
 
     if isinstance(payload, dict):
-        if isinstance(payload.get("planets"), list):
-            for item in payload["planets"]:
-                if not isinstance(item, dict):
-                    continue
-                idx = as_int(item.get("index"), -1)
-                if idx >= 0:
-                    lookup[idx] = item
-            return lookup
+        if looks_like_status_record(payload):
+            found.append(payload)
 
-        for key, item in payload.items():
-            if not isinstance(item, dict):
-                continue
-            idx = as_int(item.get("index", key), -1)
-            if idx >= 0:
-                lookup[idx] = item
+        for value in payload.values():
+            collect_status_records(value, found)
 
-    return lookup
+    elif isinstance(payload, list):
+        for item in payload:
+            collect_status_records(item, found)
+
+    return found
 
 
-def coerce_status_list(payload: Any) -> list[dict[str, Any]]:
-    if isinstance(payload, list):
-        return [x for x in payload if isinstance(x, dict)]
+def dedupe_status_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_index: dict[int, dict[str, Any]] = {}
 
-    if isinstance(payload, dict):
-        for key in ("planetStatus", "planets", "status"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                return [x for x in value if isinstance(x, dict)]
+    for record in records:
+        idx = as_int(first_non_null(record.get("index"), record.get("planetIndex")), -1)
+        if idx >= 0:
+            by_index[idx] = record
 
-    return []
+    return list(by_index.values())
 
 
 def get_planet_position(meta: dict[str, Any]) -> tuple[float | None, float | None]:
     pos = meta.get("position")
     if isinstance(pos, dict):
-        x = pos.get("x")
-        y = pos.get("y")
+        x = first_non_null(pos.get("x"), pos.get("X"), pos.get("positionX"))
+        y = first_non_null(pos.get("y"), pos.get("Y"), pos.get("positionY"))
         if x is not None and y is not None:
             return as_float(x), as_float(y)
 
-    x = meta.get("x")
-    y = meta.get("y")
+    x = first_non_null(meta.get("x"), meta.get("X"), meta.get("positionX"))
+    y = first_non_null(meta.get("y"), meta.get("Y"), meta.get("positionY"))
     if x is not None and y is not None:
         return as_float(x), as_float(y)
 
@@ -319,7 +361,7 @@ def build_planet_records(
 
         x, y, coord_source = get_projected_coords(index, info, manual_coords, bounds)
 
-        name = str(first_non_null(info.get("name"), status.get("name"), f"Planet {index}"))
+        name = str(first_non_null(info.get("name"), biome_meta.get("name"), status.get("name"), f"Planet {index}"))
         sector = str(first_non_null(info.get("sector"), status.get("sector"), ""))
 
         owner = normalize_owner(
@@ -347,9 +389,9 @@ def build_planet_records(
         normalized_hazards: list[str] = []
         for item in hazards:
             if isinstance(item, dict):
-                name_value = first_non_null(item.get("name"), item.get("description"))
-                if name_value:
-                    normalized_hazards.append(str(name_value))
+                hv = first_non_null(item.get("name"), item.get("description"))
+                if hv:
+                    normalized_hazards.append(str(hv))
             elif item:
                 normalized_hazards.append(str(item))
 
