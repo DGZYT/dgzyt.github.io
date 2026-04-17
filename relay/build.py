@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import colorsys
 import json
 import math
 import os
@@ -8,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = ROOT / "assets"
@@ -17,13 +18,13 @@ SITE_DIR = ROOT / "site"
 
 BASE_MAP_PATH = ASSETS_DIR / "base_map.png"
 COORDS_PATH = DATA_DIR / "planet_coords.json"
+PLANET_LOOKUP_PATH = DATA_DIR / "planet_lookup.json"
+SECTOR_LOOKUP_PATH = DATA_DIR / "sector_lookup.json"
 
 COMMUNITY_WAR_STATUS = "https://api.helldivers2.dev/raw/api/v1/war/status"
-COMMUNITY_WAR_INFO = "https://api.helldivers2.dev/raw/api/v1/war/info"
 COMMUNITY_PLANETS = "https://api.helldivers2.dev/raw/api/v1/planets"
 
 FALLBACK_WAR_STATUS = "https://helldiverstrainingmanual.com/api/v1/war/status"
-FALLBACK_WAR_INFO = "https://helldiverstrainingmanual.com/api/v1/war/info"
 FALLBACK_PLANETS = "https://helldiverstrainingmanual.com/api/v1/planets"
 
 TIMEOUT = 20
@@ -36,6 +37,21 @@ OWNER_COLORS = {
     "Illuminate": (185, 100, 255, 255),
     "Unknown": (170, 170, 170, 255),
 }
+
+
+# Stable, pleasant colors for sector regions.
+SECTOR_PALETTE = [
+    (84, 163, 255),
+    (255, 150, 82),
+    (115, 225, 140),
+    (210, 120, 255),
+    (255, 95, 135),
+    (255, 217, 102),
+    (84, 235, 214),
+    (194, 255, 95),
+    (255, 130, 210),
+    (125, 180, 255),
+]
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -136,103 +152,61 @@ def normalize_owner(owner_value: Any) -> str:
     return faction_map.get(owner_value, "Unknown")
 
 
-def looks_like_planet_info_record(item: Any) -> bool:
-    if not isinstance(item, dict):
-        return False
+def coerce_planet_lookup(payload: Any) -> dict[int, dict[str, Any]]:
+    lookup: dict[int, dict[str, Any]] = {}
 
-    has_index = "index" in item
-    has_position = isinstance(item.get("position"), dict) and (
-        "x" in item["position"] and "y" in item["position"]
-    )
-    has_name = "name" in item
-    has_sector = "sector" in item
-
-    return has_index and (has_position or has_name or has_sector)
-
-
-def collect_planet_info_records(payload: Any, found: dict[int, dict[str, Any]] | None = None) -> dict[int, dict[str, Any]]:
-    if found is None:
-        found = {}
-
-    if isinstance(payload, dict):
-        if looks_like_planet_info_record(payload):
-            idx = as_int(payload.get("index"), -1)
+    if isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            idx = as_int(first_non_null(item.get("index"), item.get("planetIndex")), -1)
             if idx >= 0:
-                found[idx] = payload
-
-        for value in payload.values():
-            collect_planet_info_records(value, found)
-
-    elif isinstance(payload, list):
-        for item in payload:
-            collect_planet_info_records(item, found)
-
-    return found
-
-
-def looks_like_status_record(item: Any) -> bool:
-    if not isinstance(item, dict):
-        return False
-
-    has_index = "index" in item or "planetIndex" in item
-    has_live_fields = any(
-        key in item
-        for key in (
-            "health",
-            "maxHealth",
-            "owner",
-            "currentOwner",
-            "statistics",
-            "players",
-            "playerCount",
-            "regenPerSecond",
-            "attacking",
-            "event",
-            "liberation",
-        )
-    )
-    return has_index and has_live_fields
-
-
-def collect_status_records(payload: Any, found: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-    if found is None:
-        found = []
+                lookup[idx] = item
+        return lookup
 
     if isinstance(payload, dict):
-        if looks_like_status_record(payload):
-            found.append(payload)
+        if isinstance(payload.get("planets"), list):
+            for item in payload["planets"]:
+                if not isinstance(item, dict):
+                    continue
+                idx = as_int(first_non_null(item.get("index"), item.get("planetIndex")), -1)
+                if idx >= 0:
+                    lookup[idx] = item
+            return lookup
 
-        for value in payload.values():
-            collect_status_records(value, found)
+        for key, item in payload.items():
+            if not isinstance(item, dict):
+                continue
+            idx = as_int(first_non_null(item.get("index"), item.get("planetIndex"), key), -1)
+            if idx >= 0:
+                lookup[idx] = item
 
-    elif isinstance(payload, list):
-        for item in payload:
-            collect_status_records(item, found)
-
-    return found
+    return lookup
 
 
-def dedupe_status_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    by_index: dict[int, dict[str, Any]] = {}
+def coerce_status_list(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
 
-    for record in records:
-        idx = as_int(first_non_null(record.get("index"), record.get("planetIndex")), -1)
-        if idx >= 0:
-            by_index[idx] = record
+    if isinstance(payload, dict):
+        for key in ("planetStatus", "planets", "status"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [x for x in value if isinstance(x, dict)]
 
-    return list(by_index.values())
+    return []
 
 
 def get_planet_position(meta: dict[str, Any]) -> tuple[float | None, float | None]:
     pos = meta.get("position")
     if isinstance(pos, dict):
-        x = first_non_null(pos.get("x"), pos.get("X"), pos.get("positionX"))
-        y = first_non_null(pos.get("y"), pos.get("Y"), pos.get("positionY"))
+        x = pos.get("x")
+        y = pos.get("y")
         if x is not None and y is not None:
             return as_float(x), as_float(y)
 
-    x = first_non_null(meta.get("x"), meta.get("X"), meta.get("positionX"))
-    y = first_non_null(meta.get("y"), meta.get("Y"), meta.get("positionY"))
+    x = meta.get("x")
+    y = meta.get("y")
     if x is not None and y is not None:
         return as_float(x), as_float(y)
 
@@ -276,10 +250,9 @@ def get_projected_coords(
     if raw_x is None or raw_y is None:
         return 0.5, 0.5, "fallback"
 
-    # HD2 coordinates are centered around Super Earth at (0, 0),
-    # so project directly into the circular board.
-    norm_x = 0.5 + (raw_x * 0.5)
-    norm_y = 0.5 - (raw_y * 0.5)
+    min_x, max_x, min_y, max_y = bounds
+    norm_x = (raw_x - min_x) / (max_x - min_x)
+    norm_y = 1.0 - ((raw_y - min_y) / (max_y - min_y))
 
     return clamp(norm_x, 0.0, 1.0), clamp(norm_y, 0.0, 1.0), "auto"
 
@@ -342,13 +315,46 @@ def get_event_type(status_entry: dict[str, Any], attacking: list[int], players: 
     return "none"
 
 
+def string_hash(value: str) -> int:
+    # Deterministic hash (do not use Python's hash() because it is salted per process).
+    h = 2166136261
+    for ch in value:
+        h ^= ord(ch)
+        h = (h * 16777619) & 0xFFFFFFFF
+    return h
+
+
+def get_sector_color(sector_key: str) -> tuple[int, int, int, int]:
+    if not sector_key:
+        return (120, 120, 120, 70)
+
+    base = SECTOR_PALETTE[string_hash(sector_key) % len(SECTOR_PALETTE)]
+
+    # Slightly perturb the lightness/saturation to reduce collisions while keeping a cohesive palette.
+    h, s, v = colorsys.rgb_to_hsv(base[0] / 255.0, base[1] / 255.0, base[2] / 255.0)
+    tweak = (string_hash(sector_key + "-tweak") % 9 - 4) * 0.015
+    s = clamp(s + tweak, 0.45, 0.75)
+    v = clamp(v + tweak * 0.8, 0.70, 1.00)
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return (int(r * 255), int(g * 255), int(b * 255), 74)
+
+
+def sector_key_for_planet(planet: dict[str, Any]) -> str:
+    if planet.get("sector"):
+        return str(planet["sector"])
+    if planet.get("sectorId") is not None:
+        return str(planet["sectorId"])
+    return "Unknown"
+
+
 def build_planet_records(
     status_list: list[dict[str, Any]],
-    war_info_lookup: dict[int, dict[str, Any]],
-    biome_lookup: dict[int, dict[str, Any]],
+    planet_lookup: dict[int, dict[str, Any]],
     manual_coords: dict[str, Any],
+    planet_name_lookup: dict[str, Any],
+    sector_name_lookup: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    bounds = compute_position_bounds(war_info_lookup)
+    bounds = compute_position_bounds(planet_lookup)
     records: list[dict[str, Any]] = []
 
     for status in status_list:
@@ -356,20 +362,48 @@ def build_planet_records(
         if index < 0:
             continue
 
-        info = war_info_lookup.get(index, {})
-        biome_meta = biome_lookup.get(index, {})
+        meta = planet_lookup.get(index, {})
+        static_meta = planet_name_lookup.get(str(index), {})
+        x, y, coord_source = get_projected_coords(index, meta, manual_coords, bounds)
 
-        x, y, coord_source = get_projected_coords(index, info, manual_coords, bounds)
+        raw_sector_id = first_non_null(
+            static_meta.get("sectorId"),
+            meta.get("sectorId"),
+            meta.get("sector"),
+            status.get("sectorId"),
+            status.get("sector"),
+        )
+        sector_id = as_int(raw_sector_id, as_int(meta.get("sector"), 0))
 
-        name = str(first_non_null(info.get("name"), biome_meta.get("name"), status.get("name"), f"Planet {index}"))
-        sector = str(first_non_null(info.get("sector"), status.get("sector"), ""))
+        name = str(
+            first_non_null(
+                static_meta.get("name"),
+                meta.get("name"),
+                status.get("name"),
+                f"Planet {index}",
+            )
+        )
+
+        sector_name = first_non_null(
+            sector_name_lookup.get(str(sector_id)),
+            static_meta.get("sector"),
+        )
+        if sector_name is None:
+            if isinstance(meta.get("sector"), str) and not str(meta.get("sector")).isdigit():
+                sector_name = meta.get("sector")
+            elif isinstance(status.get("sector"), str) and not str(status.get("sector")).isdigit():
+                sector_name = status.get("sector")
+            elif sector_id:
+                sector_name = f"Sector {sector_id}"
+            else:
+                sector_name = ""
 
         owner = normalize_owner(
             first_non_null(
                 status.get("owner"),
                 status.get("currentOwner"),
-                info.get("currentOwner"),
-                info.get("owner"),
+                meta.get("currentOwner"),
+                meta.get("owner"),
             )
         )
 
@@ -378,20 +412,29 @@ def build_planet_records(
         liberation = round(get_liberation(status), 2)
         event_type = get_event_type(status, attacking, players)
 
-        biome = first_non_null(biome_meta.get("biome"), biome_meta.get("environment"), "")
+        biome = first_non_null(
+            static_meta.get("biome"),
+            meta.get("biome"),
+            meta.get("environment"),
+            "",
+        )
         if isinstance(biome, dict):
             biome = biome.get("name", "")
 
-        hazards = biome_meta.get("environmentals", [])
+        hazards = first_non_null(
+            static_meta.get("hazards"),
+            meta.get("environmentals"),
+            [],
+        )
         if not isinstance(hazards, list):
             hazards = []
 
         normalized_hazards: list[str] = []
         for item in hazards:
             if isinstance(item, dict):
-                hv = first_non_null(item.get("name"), item.get("description"))
-                if hv:
-                    normalized_hazards.append(str(hv))
+                name_value = first_non_null(item.get("name"), item.get("description"))
+                if name_value:
+                    normalized_hazards.append(str(name_value))
             elif item:
                 normalized_hazards.append(str(item))
 
@@ -399,7 +442,8 @@ def build_planet_records(
             {
                 "index": index,
                 "name": name,
-                "sector": sector,
+                "sectorId": sector_id,
+                "sector": str(sector_name or ""),
                 "x": round(x, 6),
                 "y": round(y, 6),
                 "owner": owner,
@@ -435,13 +479,99 @@ def draw_ring(draw: ImageDraw.ImageDraw, x: int, y: int, r: int, color: tuple[in
         draw.ellipse((x - r - offset, y - r - offset, x + r + offset, y + r + offset), outline=color)
 
 
+def render_sector_overlay(planets: list[dict[str, Any]], size: tuple[int, int]) -> Image.Image:
+    width, height = size
+
+    # Work at a smaller resolution for performance, then scale up and blur.
+    downsample = 4
+    small_w = max(1, width // downsample)
+    small_h = max(1, height // downsample)
+
+    overlay = Image.new("RGBA", (small_w, small_h), (0, 0, 0, 0))
+    pixels = overlay.load()
+
+    sectors: dict[str, list[tuple[float, float]]] = {}
+    for planet in planets:
+        sector_key = sector_key_for_planet(planet)
+        sectors.setdefault(sector_key, []).append((planet["x"], planet["y"]))
+
+    if not sectors:
+        return Image.new("RGBA", size, (0, 0, 0, 0))
+
+    sector_centroids: dict[str, tuple[float, float]] = {}
+    for sector_key, pts in sectors.items():
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        sector_centroids[sector_key] = (cx, cy)
+
+    center_x = 0.5
+    center_y = 0.5
+    radius_x = 0.44
+    radius_y = 0.44
+
+    for py in range(small_h):
+        y = py / max(1, small_h - 1)
+        ny = (y - center_y) / radius_y
+        for px in range(small_w):
+            x = px / max(1, small_w - 1)
+            nx = (x - center_x) / radius_x
+
+            # Elliptical galaxy mask.
+            radial = nx * nx + ny * ny
+            if radial > 1.0:
+                continue
+
+            nearest_sector = None
+            best_dist = float("inf")
+            for sector_key, (cx, cy) in sector_centroids.items():
+                dx = x - cx
+                dy = y - cy
+                dist = dx * dx + dy * dy
+                if dist < best_dist:
+                    best_dist = dist
+                    nearest_sector = sector_key
+
+            if nearest_sector is None:
+                continue
+
+            color = get_sector_color(nearest_sector)
+
+            # Fade slightly toward the edge of the galaxy to keep the base art visible.
+            edge_fade = clamp(1.0 - (radial ** 1.2), 0.0, 1.0)
+            alpha = int(color[3] * (0.35 + 0.65 * edge_fade))
+            pixels[px, py] = (color[0], color[1], color[2], alpha)
+
+    overlay = overlay.resize(size, resample=Image.Resampling.BILINEAR)
+    overlay = overlay.filter(ImageFilter.GaussianBlur(radius=10))
+
+    # Add thin boundary lines by detecting color changes in the overlay.
+    boundary = Image.new("RGBA", size, (0, 0, 0, 0))
+    src = overlay.load()
+    dst = boundary.load()
+    for y in range(1, height - 1):
+        for x in range(1, width - 1):
+            a = src[x, y][3]
+            if a == 0:
+                continue
+            if src[x + 1, y][:3] != src[x - 1, y][:3] or src[x, y + 1][:3] != src[x, y - 1][:3]:
+                dst[x, y] = (255, 255, 255, 34)
+    boundary = boundary.filter(ImageFilter.GaussianBlur(radius=1))
+
+    final_overlay = Image.alpha_composite(overlay, boundary)
+    return final_overlay
+
+
 def render_map(planets: list[dict[str, Any]], output_path: Path) -> None:
     base = ensure_base_map()
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    width, height = base.size
+
+    # Sector overlay (Option B: influence map based on sector membership / nearest centroid).
+    sector_overlay = render_sector_overlay(planets, base.size)
+    overlay = Image.alpha_composite(overlay, sector_overlay)
+
     draw = ImageDraw.Draw(overlay)
     font = ImageFont.load_default()
-
-    width, height = base.size
     by_index = {p["index"]: p for p in planets}
 
     for planet in planets:
@@ -556,22 +686,21 @@ def main() -> None:
         headers["X-Super-Contact"] = contact
 
     war_status_payload = fetch_json(COMMUNITY_WAR_STATUS, FALLBACK_WAR_STATUS, headers=headers)
-    war_info_payload = fetch_json(COMMUNITY_WAR_INFO, FALLBACK_WAR_INFO, headers=headers)
     planets_payload = fetch_json(COMMUNITY_PLANETS, FALLBACK_PLANETS, headers=headers)
 
-    war_info_lookup = collect_planet_info_records(war_info_payload)
-    biome_lookup = collect_planet_info_records(planets_payload)
-
-    status_candidates = collect_status_records(war_status_payload)
-    status_list = dedupe_status_records(status_candidates)
-
+    planet_lookup = coerce_planet_lookup(planets_payload)
+    status_list = coerce_status_list(war_status_payload)
     manual_coords = load_json_file(COORDS_PATH, default={})
+    planet_name_lookup = load_json_file(PLANET_LOOKUP_PATH, default={})
+    sector_name_lookup = load_json_file(SECTOR_LOOKUP_PATH, default={})
 
-    print(f"war_info planets found: {len(war_info_lookup)}")
-    print(f"biome planets found: {len(biome_lookup)}")
-    print(f"status records found: {len(status_list)}")
-
-    planets = build_planet_records(status_list, war_info_lookup, biome_lookup, manual_coords)
+    planets = build_planet_records(
+        status_list,
+        planet_lookup,
+        manual_coords,
+        planet_name_lookup,
+        sector_name_lookup,
+    )
 
     base_url = derive_pages_base_url()
     updated_at = datetime.now(timezone.utc).isoformat()
